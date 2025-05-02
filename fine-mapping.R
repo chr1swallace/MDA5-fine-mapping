@@ -6,6 +6,8 @@ en=163318684
 message("window: ",st,"-",en)
 source("get-data.R")
 
+################################################################################
+
 ## * flip alleles
     ## Yorgo: I want to list the MDA5 alleles at residues 843 and 946 as T946A and R843H but in your meta analysis you used A946T and H843R. Can I just change the sign of beta to reverse the allele or does beta need to be recalculated?
 v=fread("variants.txt")
@@ -93,10 +95,22 @@ save(S,file="~/scratch/ifih1/S.RData")
 
 save(LD,MAF,MR,uMR,variants,file="extra.RData")
 
+################################################################################
+
 ## * examine results
 (load("~/scratch/ifih1/S.RData"))
 (load("~/scratch/ifih1/D.RData"))
 (load("extra.RData")) # flipped LD, MAF in here
+nm=names(D)
+nm[names(D)=="liu_uc"]="Ulcerative colitis"
+nm[names(D)=="liu_cro"]="Crohn's disease"
+nm[names(D)=="robs_t1d_eur"]="Type 1 diabetes"
+nm[names(D)=="chiou_t1d"]="Type 1 diabetes"
+nm[names(D)=="tsoi_pso"]="Psoriasis"
+nm[names(D)=="ukbb_hypo"]="Hypothyroidism"
+
+## key snps from Yorgo
+v=fread("variants.txt")
 
 ## compare credsets
 sapply(S, function(s) length(s$sets$cs))
@@ -105,6 +119,24 @@ sapply(S, function(s) sapply(s$sets$cs,names))
 CS=lapply(S, function(s) s$sets$cs)
 POS=lapply(CS, function(cs) lapply(cs, function(x) as.numeric(gsub("^2-|-[AGCT]-[ACGT]","",names(x)))))
 VAR=lapply(POS, function(pos) lapply(pos, function(p) v[pos38 %in% p]))
+
+## write out PP for each set
+if(!file.exists("results"))
+  dir.create("results")
+Duse=grep("liu|robs_t1d_eur|tsoi|hypo",names(D))
+for(d in Duse) {
+  pip=as.matrix(S[[d]]$pip)
+  colnames(pip)="pip"
+  if(!is.null(S[[d]]$sets$cs_index)) {
+    pp=S[[d]]$alpha[ S[[d]]$sets$cs_index , , drop=FALSE] %>% t()
+    colnames(pp)=names(S[[d]]$sets$cs) %>% sub("L","CS",.) %>% paste0(., "_pp")
+    pip=cbind(pip,pp)
+  }
+  pip %<>% as.data.frame()
+  pip$data=nm[d]
+  pip=pip[,c("data","pip",sort(setdiff(names(pip),c("pip","data"))))]
+  write.table(pip, file=paste0("results/pp_",make.names(nm[d]),".csv"))
+}
 
 cols=c("dodgerblue2", 
         "green4", "#6A3D9A", "#FF7F00", "gold1", "skyblue2", 
@@ -118,17 +150,7 @@ library(grid)
 library(gridBase)
 library(gridExtra)
 
-## look at key snps from Yorgo
-v=fread("variants.txt")
-
 ## write out data we are about to plot
-nm=names(D)
-nm[names(D)=="liu_uc"]="Ulcerative colitis"
-nm[names(D)=="liu_cro"]="Crohn's disease"
-nm[names(D)=="robs_t1d_eur"]="Type 1 diabetes (Eur)"
-nm[names(D)=="chiou_t1d"]="Type 1 diabetes"
-nm[names(D)=="tsoi_pso"]="Psoriasis"
-nm[names(D)=="ukbb_hypo"]="Hypothyroidism"
 
 Duse=grep("liu|robs_t1d_eur|tsoi|hypo",names(D))
 for(i in Duse) {
@@ -137,8 +159,33 @@ for(i in Duse) {
     fwrite(dt, file=paste0(names(D)[i],"-v2.csv"))
 }
 
-## * supplementary figure - manhattans
+## * run coloc across diseases
+library(coloc)
+Duse_nocr=setdiff(Duse, 2) # because Crohn's has no CS
+todo=expand.grid(Duse_nocr,Duse_nocr) %>% as.data.table()
+todo=todo[Var1 < Var2]
+RESULTS=vector("list",nrow(todo))
+for(i in 1:nrow(todo)) {
+    RESULTS[[i]]=coloc.susie(S[[ todo$Var1[i] ]],
+    S[[ todo$Var2[i] ]])$summary
+    RESULTS[[i]][,d1:=nm[todo$Var1[i]]][,d2:=nm[todo$Var2[i]]]
+}
+results=rbindlist(RESULTS)
+setnames(results, c("idx1","idx2"), c("CSindex_d1","CSindex_d2"))
 
+## fix snp names
+results[,c("chr","pos38","a1","a2"):=tstrsplit(hit1,"-")]
+results[,pos38:=as.integer(pos38)]
+results=merge(results, uMR[,.(pos38,leadsnp_d1=SNP)], all.x=TRUE)
+results[,c("chr","pos38","a1","a2"):=tstrsplit(hit1,"-")]
+results[,pos38:=as.integer(pos38)]
+results=merge(results, uMR[,.(pos38,leadsnp_d2=SNP)], all.x=TRUE)
+results[,chr:=NULL][,pos38:=NULL][,a1:=NULL][,a2:=NULL]
+
+results[PP.H4.abf > .5]
+fwrite(results[PP.H4.abf > .5], file="results/coloc.csv")
+
+## * supplementary figure - manhattans
 pdf("manhattans5.pdf",height=8,width=12,bg="white")
 par(mfrow=c(2,3)) 
 for(i in Duse) {
@@ -223,7 +270,8 @@ B=lapply(Duse, function(i) {
                se=sqrt(d$varbeta[keep]))
     })  %>% rbindlist()
 B=merge(B, uMR[,.(position=pos38,SNP)])
-dropsnps=c("rs35337543","R843H","H843R") # won't include in the Bonferroni, because these are tags of opther variants we will include
+# dropsnps=c("rs35337543","R843H","H843R") # won't include in the Bonferroni, because these are tags of opther variants we will include
+dropsnps=c("rs35337543") # won't include in the Bonferroni, because these are tags of opther variants we will include
 w=dcast(B[!(SNP %in% dropsnps & disease %in% names(D)[Duse])], position+ snp ~ disease, value.var=c("beta","se"))
 m=melt(w, c("position","snp","beta_robs_t1d_eur","se_robs_t1d_eur"),
        list("beta_liu_cro", "se_liu_cro",
@@ -253,7 +301,8 @@ for(i in 1:nrow(B)) {
 B[,EAF:=MAF[snp]]
 
 ## only Robertson EUR from t1d studies
-B[,totest:=!(SNP %in% c("R843H","rs35337543"))]
+# B[,totest:=!(SNP %in% c("R843H","rs35337543"))]
+B[,totest:=!(SNP %in% c("rs35337543"))]
 B[totest==TRUE,padj:=pmin(1,p*nrow(B[totest==TRUE]))]
 fwrite(B[totest==TRUE | SNP=="rs35337543" | (SNP=="R843H" & disease %in% B[totest==TRUE]$disease)][order(SNP,disease),.(SNP,snp,EAF,disease=disease_short,study=disease,totest,beta,se,inset,p,padj)], file="supptable-robertson.csv")
 
